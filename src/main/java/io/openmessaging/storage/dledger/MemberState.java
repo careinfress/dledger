@@ -117,6 +117,7 @@ public class MemberState {
             ++currTerm;
         }
         currVoteFor = null;
+        // 持久化
         persistTerm();
         return currTerm;
     }

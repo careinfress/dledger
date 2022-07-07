@@ -413,6 +413,7 @@ public class DLedgerLeaderElector {
     }
 
     private long getNextTimeToRequestVote() {
+        // 下一次倒计时:当前时间戳 + 上次投票的开销 + 最小投票间隔(300ms) + (1000 - 300)之间的随机值
         return System.currentTimeMillis() + lastVoteCost + minVoteIntervalMs + random.nextInt(maxVoteIntervalMs - minVoteIntervalMs);
     }
 
@@ -420,7 +421,7 @@ public class DLedgerLeaderElector {
         // for candidate
         // nextTimeToRequestVote: 下一次发发起的投票的时间，如果当前时间小于该值，说明计时器未过期，此时无需发起投票。
         // needIncreaseTermImmediately: 是否应该立即发起投票。如果为 true，则忽略计时器，该值默认为 false，
-        // 当收到从主节点的心跳包并且当前状态机的轮次大于主节点的轮次，说明集群中 Leader 的投票轮次小于从几点的轮次，应该立即发起新的投票
+        // 当收到从主节点的心跳包并且当前状态机的轮次大于主节点的轮次，说明集群中 Leader 的投票轮次小于自己的轮次，应该立即发起新的投票
         if (System.currentTimeMillis() < nextTimeToRequestVote && !needIncreaseTermImmediately) {
             return;
         }
@@ -436,12 +437,15 @@ public class DLedgerLeaderElector {
             }
             // 第一次 lastParseResult == VoteResponse.ParseResult.WAIT_TO_VOTE_NEXT 返回 true
             if (lastParseResult == VoteResponse.ParseResult.WAIT_TO_VOTE_NEXT || needIncreaseTermImmediately) {
+                // 根据当前状态机获取下一轮的投票轮次
+                // 第一轮prevTerm=-1
                 long prevTerm = memberState.currTerm();
-                // 第一轮都是 -1
+                // 下一轮次term=0
                 term = memberState.nextTerm();
                 logger.info("{}_[INCREASE_TERM] from {} to {}", memberState.getSelfId(), prevTerm, term);
                 lastParseResult = VoteResponse.ParseResult.WAIT_TO_REVOTE;
             } else {
+                // 投票轮次依然为状态机内部维护的轮次
                 term = memberState.currTerm();
             }
             // 第一轮都是 -1
@@ -449,7 +453,9 @@ public class DLedgerLeaderElector {
             // 第一轮都是 -1
             ledgerEndTerm = memberState.getLedgerEndTerm();
         }
+        // 如果 needIncreaseTermImmediately 为 true，则重置该标记位为 false， 并重新设置下一次投票超时时间
         if (needIncreaseTermImmediately) {
+            // 下一次投票的时间
             nextTimeToRequestVote = getNextTimeToRequestVote();
             needIncreaseTermImmediately = false;
             return;
@@ -481,10 +487,12 @@ public class DLedgerLeaderElector {
                         throw ex;
                     }
                     logger.info("[{}][GetVoteResponse] {}", memberState.getSelfId(), JSON.toJSONString(x));
+
                     // 如果投票结果不是 UNKNOW，则有效投票数量增 1
                     if (x.getVoteResult() != VoteResponse.RESULT.UNKNOWN) {
                         validNum.incrementAndGet();
                     }
+
                     synchronized (knownMaxTermInGroup) {
                         switch (x.getVoteResult()) {
                             // 赞成票，acceptedNum 加一，只有得到的赞成票超过集群节点数量的一半才能成为Leader
@@ -518,7 +526,7 @@ public class DLedgerLeaderElector {
                                 biggerLedgerNum.incrementAndGet();
                                 break;
                             // 拒绝票，对端的投票轮次小于自己的 team，则认为对端还未准备好投票，对端使用自
-                            // 己的投票轮次，是自己进入到 Candidate 状态。
+                            // 己的投票轮次，使自己进入到 Candidate 状态。
                             case REJECT_TERM_NOT_READY:
                                 notReadyTermNum.incrementAndGet();
                                 break;
@@ -527,14 +535,18 @@ public class DLedgerLeaderElector {
                         }
                     }
 
-                    if (alreadyHasLeader.get()
-                        || memberState.isQuorum(acceptedNum.get())
-                        || memberState.isQuorum(acceptedNum.get() + notReadyTermNum.get())) {
+                    // 统计票数
+                    if (alreadyHasLeader.get() // 已经找到 leader
+                        || memberState.isQuorum(acceptedNum.get()) // 超过半数
+                        || memberState.isQuorum(acceptedNum.get() + notReadyTermNum.get()) // 超过半数
+                    ) {
                         voteLatch.countDown();
                     }
+
                 } catch (Throwable t) {
                     logger.error("Get error when parsing vote response ", t);
                 } finally {
+                    // 所有投票票数都收集
                     allNum.incrementAndGet();
                     if (allNum.get() == memberState.peerSize()) {
                         voteLatch.countDown();
@@ -550,21 +562,38 @@ public class DLedgerLeaderElector {
 
         }
         // 根据收集的投票结果判断是否能成为 Leader
+        // elapsed 方法就是计算两个时间的差值
         lastVoteCost = DLedgerUtils.elapsed(startVoteTimeMs);
         VoteResponse.ParseResult parseResult;
+
+        // 如果对端的投票轮次大于发起投票的节点，则该节点使用对端的轮次，重新进入到 Candidate 状态，并且重置投票计时器，其值为“1 个常规计时器”
         if (knownMaxTermInGroup.get() > term) {
             parseResult = VoteResponse.ParseResult.WAIT_TO_VOTE_NEXT;
             nextTimeToRequestVote = getNextTimeToRequestVote();
             changeRoleToCandidate(knownMaxTermInGroup.get());
-        } else if (alreadyHasLeader.get()) {
+        }
+
+        // 如果已经存在 Leader，该节点重新进入到 Candidate,并重置定时器，该定时器的时间: “1 个常规计时器” + heartBeatTimeIntervalMs * maxHeartBeatLeak
+        // 其中 heartBeatTimeIntervalMs 为一次心跳间隔时间
+        // maxHeartBeatLeak 为允许最大丢失的心跳包，即如果 Flower 节点在多少个心跳周期内未收到心跳包，则认为 Leader 已下线
+        else if (alreadyHasLeader.get()) {
             parseResult = VoteResponse.ParseResult.WAIT_TO_VOTE_NEXT;
             nextTimeToRequestVote = getNextTimeToRequestVote() + heartBeatTimeIntervalMs * maxHeartBeatLeak;
-        } else if (!memberState.isQuorum(validNum.get())) {
+        }
+
+        // 如果收到的有效票数未超过半数，则重置计时器为“ 1 个常规计时器”，然后等待重新投票
+        // 注意状态为 WAIT_TO_REVOTE，该状态下的特征是下次投票时不增加投票轮次
+        else if (!memberState.isQuorum(validNum.get())) {
             parseResult = VoteResponse.ParseResult.WAIT_TO_REVOTE;
             nextTimeToRequestVote = getNextTimeToRequestVote();
-        } else if (memberState.isQuorum(acceptedNum.get())) {
+        }
+
+        // 如果得到的赞同票超过半数，则成为 Leader
+        else if (memberState.isQuorum(acceptedNum.get())) {
             parseResult = VoteResponse.ParseResult.PASSED;
-        } else if (memberState.isQuorum(acceptedNum.get() + notReadyTermNum.get())) {
+        }
+
+        else if (memberState.isQuorum(acceptedNum.get() + notReadyTermNum.get())) {
             parseResult = VoteResponse.ParseResult.REVOTE_IMMEDIATELY;
         } else if (memberState.isQuorum(acceptedNum.get() + biggerLedgerNum.get())) {
             parseResult = VoteResponse.ParseResult.WAIT_TO_REVOTE;
