@@ -322,35 +322,61 @@ public class DLedgerMmapFileStore extends DLedgerStore {
 
     @Override
     public DLedgerEntry appendAsLeader(DLedgerEntry entry) {
+        // Step1:首先判断是否可以追加数据，其判断依据主要是如下两点:
+        // 当前节点的状态是否是 Leader，如果不是，则抛出异常
         PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
+        // 当前磁盘是否已满，其判断依据是 DLedger 的根目录或数据文件目录的使用率超
+        // 过了允许使用的最大值，默认值为 85%
         PreConditions.check(!isDiskFull, DLedgerResponseCode.DISK_FULL);
+        // Step2:从本地线程变量获取一个数据与索引 buffer
+        // 其中用于存储数据的 ByteBuffer，其容量固定为 4M
+        // 索引的 ByteBuffer 为两个索引条目的长度，固定为 64 个字节
         ByteBuffer dataBuffer = localEntryBuffer.get();
         ByteBuffer indexBuffer = localIndexBuffer.get();
+        // Step3:将 DLedgerEntry，即将数据写入到 ByteBuffer 中
+        // 从这里看出，每一次写入会调用 ByteBuffer 的 clear 方法，将数据清空
+        // 从这里可以看出，每一次数据追加， 只能存储 4M 的数据。
         DLedgerEntryCoder.encode(entry, dataBuffer);
         int entrySize = dataBuffer.remaining();
         synchronized (memberState) {
+            // Step4:锁定状态机，并再一次检测节点的状态是否是 Leader 节点。
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER, null);
             long nextIndex = ledgerEndIndex + 1;
             entry.setIndex(nextIndex);
             entry.setTerm(memberState.currTerm());
             entry.setMagic(CURRENT_MAGIC);
+            // Step5:为当前日志条目设置序号，即 entryIndex 与 entryTerm (投票轮次)
+            // 并将魔数、entryIndex、entryTerm 等写入到 bytebuffer 中
             DLedgerEntryCoder.setIndexTerm(dataBuffer, nextIndex, memberState.currTerm(), CURRENT_MAGIC);
+
+            // Step6:计算新的消息的起始偏移量，关于 dataFileList 的 preAppend 后续详细介绍其实现
+            // 然后将该偏移量写入日志的 bytebuffer 中
             long prePos = dataFileList.preAppend(dataBuffer.remaining());
             entry.setPos(prePos);
             PreConditions.check(prePos != -1, DLedgerResponseCode.DISK_ERROR, null);
             DLedgerEntryCoder.setPos(dataBuffer, prePos);
+            // Step7:执行钩子函数。
             for (AppendHook writeHook : appendHooks) {
                 writeHook.doHook(entry, dataBuffer.slice(), DLedgerEntry.BODY_OFFSET);
             }
+            // Step8:将数据追加到 pagecache 中。该方法稍后详细介绍
             long dataPos = dataFileList.append(dataBuffer.array(), 0, dataBuffer.remaining());
+
             PreConditions.check(dataPos != -1, DLedgerResponseCode.DISK_ERROR, null);
             PreConditions.check(dataPos == prePos, DLedgerResponseCode.DISK_ERROR, null);
+
+            // Step9:构建条目索引并将索引数据追加到 pagecache。
             DLedgerEntryCoder.encodeIndex(dataPos, entrySize, CURRENT_MAGIC, nextIndex, memberState.currTerm(), indexBuffer);
             long indexPos = indexFileList.append(indexBuffer.array(), 0, indexBuffer.remaining(), false);
+
             PreConditions.check(indexPos == entry.getIndex() * INDEX_UNIT_SIZE, DLedgerResponseCode.DISK_ERROR, null);
+
             if (logger.isDebugEnabled()) {
                 logger.info("[{}] Append as Leader {} {}", memberState.getSelfId(), entry.getIndex(), entry.getBody().length);
             }
+
+            // Step10:ledgerEndeIndex 加一(下一个条目)的序号
+            // 并设置 leader 节点的状态机的 ledgerEndIndex 与 ledgerEndTerm。
             ledgerEndIndex++;
             ledgerEndTerm = memberState.currTerm();
             if (ledgerBeginIndex == -1) {

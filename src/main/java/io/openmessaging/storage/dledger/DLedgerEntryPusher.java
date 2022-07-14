@@ -68,6 +68,7 @@ public class DLedgerEntryPusher {
         this.memberState = memberState;
         this.dLedgerStore = dLedgerStore;
         this.dLedgerRpcService = dLedgerRpcService;
+        // 构建 DLedgerEntryPusher 时会为每一个子节点创建一 EntryDispatcher 对象。
         for (String peer : memberState.getPeerMap().keySet()) {
             if (!peer.equals(memberState.getSelfId())) {
                 dispatcherMap.put(peer, new EntryDispatcher(peer, logger));
@@ -113,9 +114,18 @@ public class DLedgerEntryPusher {
         }
     }
 
+    /**
+     *
+     * @param term 当前的投票轮次
+     * @param peerId 当前节点的 ID。
+     * @param index 当前追加数据的序号
+     */
     private void updatePeerWaterMark(long term, String peerId, long index) {
         synchronized (peerWaterMarksByTerm) {
+            // 初始化 peerWaterMarksByTerm 数据结构
+            // 其结果为 < Long /** term */, Map<String /** peerId */, Long /** entry index*/>
             checkTermForWaterMark(term, "updatePeerWaterMark");
+            // 如果 peerWaterMarksByTerm 存储的 index 小于当前数据的 index， 则更新
             if (peerWaterMarksByTerm.get(term).get(peerId) < index) {
                 peerWaterMarksByTerm.get(term).put(peerId, index);
             }
@@ -129,13 +139,28 @@ public class DLedgerEntryPusher {
         }
     }
 
+    /**
+     * 如何判断 Push 队列是否已满
+     * @param currTerm
+     * @return
+     */
     public boolean isPendingFull(long currTerm) {
+        // 检查当前投票轮次是否在 PendingMap 中，如果不在，则初始化，其结构为
+        // Map<Long/* 投票轮次*/, ConcurrentMap<Long, TimeoutFuture<AppendEnt ryResponse>>>
         checkTermForPendingMap(currTerm, "isPendingFull");
+        // 检测当前等待从节点返回结果的个数是否超过其最大请求数量，可通过 maxPendingRequestsNum 配置，该值默认为:10000。
         return pendingAppendResponsesByTerm.get(currTerm).size() > dLedgerConfig.getMaxPendingRequestsNum();
     }
 
+    /**
+     * 主节点等待从节点复制 ACK
+     * @param entry
+     * @return
+     */
     public CompletableFuture<AppendEntryResponse> waitAck(DLedgerEntry entry) {
+        // 更新当前节点的 push 水位线
         updatePeerWaterMark(entry.getTerm(), memberState.getSelfId(), entry.getIndex());
+        // 如果集群的节点个数为 1，无需转发，直接返回成功结果
         if (memberState.getPeerMap().size() == 1) {
             AppendEntryResponse response = new AppendEntryResponse();
             response.setGroup(memberState.getGroup());
@@ -144,20 +169,25 @@ public class DLedgerEntryPusher {
             response.setTerm(entry.getTerm());
             response.setPos(entry.getPos());
             return AppendFuture.newCompletedFuture(entry.getPos(), response);
-        } else {
+        }
+        // 构建 append 响应 Future 并设置超时时间，默认值为:2500 ms，可以通过 maxWaitAckTimeMs 配置改变其默认值
+        else {
             checkTermForPendingMap(entry.getTerm(), "waitAck");
             AppendFuture<AppendEntryResponse> future = new AppendFuture<>(dLedgerConfig.getMaxWaitAckTimeMs());
             future.setPos(entry.getPos());
+            // 将构建的 Future 放入等待结果集合中
             CompletableFuture<AppendEntryResponse> old = pendingAppendResponsesByTerm.get(entry.getTerm()).put(entry.getIndex(), future);
             if (old != null) {
                 logger.warn("[MONITOR] get old wait at index={}", entry.getIndex());
             }
+            // 唤醒 Entry 转发线程，即将主节点中的数据 push 到各个从节点
             wakeUpDispatchers();
             return future;
         }
     }
 
     public void wakeUpDispatchers() {
+        // 该方法主要就是遍历转发器并唤醒。本方法的核心关键就是 EntryDispatcher
         for (EntryDispatcher dispatcher : dispatcherMap.values()) {
             dispatcher.wakeup();
         }

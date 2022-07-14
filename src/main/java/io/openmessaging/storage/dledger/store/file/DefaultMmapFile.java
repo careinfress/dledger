@@ -173,14 +173,15 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
 
     /**
      * Content of data from offset to offset + length will be wrote to file.
-     *
+     * @param data 待写入的数据，即待追加的日志
      * @param offset The offset of the subarray to be used.
      * @param length The length of the subarray to be used.
      */
     @Override
     public boolean appendMessage(final byte[] data, final int offset, final int length) {
         int currentPos = this.wrotePosition.get();
-
+        // 该方法我主要是想突出一下写入的方式是 mappedByteBuffer
+        // 是通过 FileChannel 的 map 方法创建，即我们常说的 PageCache，即消息追加首先是写入到 pageCache 中
         if ((currentPos + length) <= this.fileSize) {
             ByteBuffer byteBuffer = this.mappedByteBuffer.slice();
             byteBuffer.position(currentPos);

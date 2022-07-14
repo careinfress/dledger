@@ -132,9 +132,9 @@ public class DLedgerServer implements DLedgerProtocolHander {
 
     /**
      * Handle the append requests:
-     *  1.append the entry to local store
-     *  2.submit the future to entry pusher and wait the quorum ack
-     *  3.if the pending requests are full, then reject it immediately
+     *  1.append the entry to local store Leader 节点存储消息
+     *  2.submit the future to entry pusher and wait the quorum ack 主节点等待从节点复制 ACK
+     *  3.if the pending requests are full, then reject it immediately 判断 Push 队列是否已满
      * @param request
      * @return
      * @throws IOException
@@ -142,10 +142,15 @@ public class DLedgerServer implements DLedgerProtocolHander {
     @Override
     public CompletableFuture<AppendEntryResponse> handleAppend(AppendEntryRequest request) throws IOException {
         try {
+            // Step1:首先验证请求的合理性
+            // 如果请求的节点 ID 不是当前处理节点，则抛出异常
             PreConditions.check(memberState.getSelfId().equals(request.getRemoteId()), DLedgerResponseCode.UNKNOWN_MEMBER, "%s != %s", request.getRemoteId(), memberState.getSelfId());
+            // 如果请求的集群不是当前节点所在的集群，则抛出异常
             PreConditions.check(memberState.getGroup().equals(request.getGroup()), DLedgerResponseCode.UNKNOWN_GROUP, "%s != %s", request.getGroup(), memberState.getGroup());
+            // 如果当前节点不是主节点，则抛出异常
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
             long currTerm = memberState.currTerm();
+            // 如果预处理队列已经满了，则拒绝客户端请求，返回 LEADER_PENDING_FULL 错误码
             if (dLedgerEntryPusher.isPendingFull(currTerm)) {
                 AppendEntryResponse appendEntryResponse = new AppendEntryResponse();
                 appendEntryResponse.setGroup(memberState.getGroup());
@@ -153,7 +158,10 @@ public class DLedgerServer implements DLedgerProtocolHander {
                 appendEntryResponse.setTerm(currTerm);
                 appendEntryResponse.setLeaderId(memberState.getSelfId());
                 return AppendFuture.newCompletedFuture(-1, appendEntryResponse);
-            } else {
+            }
+            // 如果未满，将请求封装成 DLedgerEntry，则调用 dLedgerStore 方法追加日志
+            // 并且通过使用 dLedgerEntryPusher 的 waitAck 方法同步等待副本节点的复制响应，并最终将结果返回给调用方法
+            else {
                 DLedgerEntry dLedgerEntry = new DLedgerEntry();
                 dLedgerEntry.setBody(request.getBody());
                 DLedgerEntry resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
