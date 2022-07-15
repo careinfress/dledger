@@ -382,6 +382,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
             if (ledgerBeginIndex == -1) {
                 ledgerBeginIndex = ledgerEndIndex;
             }
+            // 更新 term 以及 index
             updateLedgerEndIndexAndTerm();
             return entry;
         }
@@ -527,25 +528,41 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         return committedIndex;
     }
 
+    /**
+     *
+     * @param term 主节点当前的投票轮次
+     * @param newCommittedIndex 主节点发送日志复制请求时的已提交日志序号
+     */
     public void updateCommittedIndex(long term, long newCommittedIndex) {
+        //  如果待更新提交序号为 -1
+        //  或投票轮次小于从节点的投票轮次
+        //  或主节点投票轮次等于从节点的已提交序号，
+        //  则直接忽略本次提交动作。
         if (newCommittedIndex == -1
             || ledgerEndIndex == -1
             || term < memberState.currTerm()
             || newCommittedIndex == this.committedIndex) {
             return;
         }
+        // 如果主节点的已提交日志序号小于从节点的已提交日志序号
+        // 或待提交序号小于当前节点的最小有效日志序号
+        // 则输出警告日志[MONITOR]，并忽略本次提交动作
         if (newCommittedIndex < this.committedIndex
             || newCommittedIndex < this.ledgerBeginIndex) {
             logger.warn("[MONITOR]Skip update committed index for new={} < old={} or new={} < beginIndex={}", newCommittedIndex, this.committedIndex, newCommittedIndex, this.ledgerBeginIndex);
             return;
         }
+        // 如果从节点落后主节点太多，则重置提交索引为从节点当前最大有效日志序号
         long endIndex = ledgerEndIndex;
         if (newCommittedIndex > endIndex) {
             //If the node fall behind too much, the committedIndex will be larger than enIndex.
             newCommittedIndex = endIndex;
         }
+        // 尝试根据待提交序号从从节点查找数据，如果数据不存在，则抛出 DISK_ERROR 错误
         DLedgerEntry dLedgerEntry = get(newCommittedIndex);
         PreConditions.check(dLedgerEntry != null, DLedgerResponseCode.DISK_ERROR);
+        // 更新 commitedIndex、committedPos 两个指针
+        // DledgerStore会定时将已提交指针刷入 checkpoint 文件，达到持久化 commitedIndex 指针的目的
         this.committedIndex = newCommittedIndex;
         this.committedPos = dLedgerEntry.getPos() + dLedgerEntry.getSize();
     }

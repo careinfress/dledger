@@ -49,9 +49,13 @@ public class PushEntryRequest extends RequestOrResponse {
     }
 
     public enum Type {
+        // 将日志条目追加到从节点
         APPEND,
+        // 通常，leader 会将提交的索引附加到 append 请求，但是如果 append 请求很少且分散，leader 将发送一个单独的请求来通知从节点提交的索引
         COMMIT,
+        // 如果 Leader 发生变化，新的 Leader 需要与他的从节点的日志条目进行比较，以便截断从节点多余的数据
         COMPARE,
+        // 如果 Leader 通过索引完成日志对比，则 Leader 将发送 TRUNCATE 给它的从节点
         TRUNCATE;
     }
 }
