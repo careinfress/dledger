@@ -79,9 +79,13 @@ public class DLedgerMmapFileStore extends DLedgerStore {
     }
 
     public void startup() {
+        // 加载磁盘数据
         load();
+        // 恢复现场
         recover();
+        // 10ms刷盘一次
         flushDataService.start();
+        // 清理磁盘
         cleanSpaceService.start();
     }
 
@@ -338,6 +342,7 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         // 从这里可以看出，每一次数据追加， 只能存储 4M 的数据。
         DLedgerEntryCoder.encode(entry, dataBuffer);
         int entrySize = dataBuffer.remaining();
+        // 锁定状态机 顺序性的保证 很重要
         synchronized (memberState) {
             // Step4:锁定状态机，并再一次检测节点的状态是否是 Leader 节点。
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER, null);
@@ -445,8 +450,11 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         ByteBuffer indexBuffer = localIndexBuffer.get();
         DLedgerEntryCoder.encode(entry, dataBuffer);
         int entrySize = dataBuffer.remaining();
+        // 同样锁状态机
+        // TODO 顺序性
         synchronized (memberState) {
             PreConditions.check(memberState.isFollower(), DLedgerResponseCode.NOT_FOLLOWER, "role=%s", memberState.getRole());
+            // 顺序性
             long nextIndex = ledgerEndIndex + 1;
             PreConditions.check(nextIndex == entry.getIndex(), DLedgerResponseCode.INCONSISTENT_INDEX, null);
             PreConditions.check(leaderTerm == memberState.currTerm(), DLedgerResponseCode.INCONSISTENT_TERM, null);
@@ -607,18 +615,19 @@ public class DLedgerMmapFileStore extends DLedgerStore {
 
         @Override public void doWork() {
             try {
+                // 开始刷盘
                 long start = System.currentTimeMillis();
                 DLedgerMmapFileStore.this.dataFileList.flush(0);
                 DLedgerMmapFileStore.this.indexFileList.flush(0);
                 if (DLedgerUtils.elapsed(start) > 500) {
                     logger.info("Flush data cost={} ms", DLedgerUtils.elapsed(start));
                 }
-
+                // 3000 执行 checkPoint
                 if (DLedgerUtils.elapsed(lastCheckPointTimeMs) > dLedgerConfig.getCheckPointInterval()) {
                     persistCheckPoint();
                     lastCheckPointTimeMs = System.currentTimeMillis();
                 }
-
+                // 10ms
                 waitForRunning(dLedgerConfig.getFlushFileInterval());
             } catch (Throwable t) {
                 logger.info("Error in {}", getName(), t);

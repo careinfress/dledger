@@ -335,10 +335,14 @@ public class DLedgerLeaderElector {
             }
             // 统计心跳包发送响应结果
             HeartBeatRequest heartBeatRequest = new HeartBeatRequest();
-            heartBeatRequest.setGroup(memberState.getGroup());
-            heartBeatRequest.setLocalId(memberState.getSelfId());
             heartBeatRequest.setRemoteId(id);
+            // 集群名字 default
+            heartBeatRequest.setGroup(memberState.getGroup());
+            // 自身的ID no，n1
+            heartBeatRequest.setLocalId(memberState.getSelfId());
+            // leaderID = selfId
             heartBeatRequest.setLeaderId(leaderId);
+            // term
             heartBeatRequest.setTerm(term);
             CompletableFuture<HeartBeatResponse> future = dLedgerRpcService.heartBeat(heartBeatRequest);
             future.whenComplete((HeartBeatResponse x, Throwable ex) -> {
@@ -393,19 +397,20 @@ public class DLedgerLeaderElector {
             if (memberState.isQuorum(succNum.get() + notReadyNum.get())) {
                 lastSendHeartBeatTime = -1;
             }
-            //  如果从节点的投票轮次比主节点的大，则使用从节点的投票轮次
-            //  或从节点已经有了另外的主节点，节点状态从 Leader 转换为 Candidate
+
+            // 如果从节点的投票轮次比主节点的大，则使用从节点的投票轮次，节点状态从 Leader 转换为 Candidate
             else if (maxTerm.get() > term) {
                 changeRoleToCandidate(maxTerm.get());
             }
-
+            // 如果从节点已经有了另外的主节点，节点状态从 Leader 转换为 Candidate
             else if (inconsistLeader.get()) {
                 changeRoleToCandidate(term);
             }
-
+            // 距离上一次收到 SuccHeartBeat 已经过了3个心跳周期
             else if (DLedgerUtils.elapsed(lastSuccHeartBeatTime) > maxHeartBeatLeak * heartBeatTimeIntervalMs) {
                 changeRoleToCandidate(term);
             }
+
         }
     }
 

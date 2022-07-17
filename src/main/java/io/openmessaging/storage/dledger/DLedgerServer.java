@@ -60,10 +60,11 @@ public class DLedgerServer implements DLedgerProtocolHander {
     public DLedgerServer(DLedgerConfig dLedgerConfig) {
         this.dLedgerConfig = dLedgerConfig;
         this.memberState = new MemberState(dLedgerConfig);
+        // 存储服务
         this.dLedgerStore = createDLedgerStore(dLedgerConfig.getStoreType(), this.dLedgerConfig, this.memberState);
         // RPC 服务
         dLedgerRpcService = new DLedgerRpcNettyService(this);
-        //
+        // 日志复制
         dLedgerEntryPusher = new DLedgerEntryPusher(dLedgerConfig, memberState, dLedgerStore, dLedgerRpcService);
         // leader选举
         dLedgerLeaderElector = new DLedgerLeaderElector(dLedgerConfig, memberState, dLedgerRpcService);
@@ -72,9 +73,13 @@ public class DLedgerServer implements DLedgerProtocolHander {
 
 
     public void startup() {
+        // 存储服务启动
         this.dLedgerStore.startup();
+        // RPC 服务启动
         this.dLedgerRpcService.startup();
+        // 日志复制服务启动
         this.dLedgerEntryPusher.startup();
+        // leader选举启动
         this.dLedgerLeaderElector.startup();
     }
 

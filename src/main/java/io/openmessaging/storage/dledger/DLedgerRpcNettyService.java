@@ -93,11 +93,17 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
         nettyServerConfig.setListenPort(Integer.valueOf(memberState.getSelfAddr().split(":")[1]));
         this.remotingServer = new NettyRemotingServer(nettyServerConfig, null);
         this.remotingServer.registerProcessor(DLedgerRequestCode.METADATA.getCode(), protocolProcessor, null);
+        // 处理客户端的 append 请求
         this.remotingServer.registerProcessor(DLedgerRequestCode.APPEND.getCode(), protocolProcessor, null);
+        // 处理客户端的 Get 请求
         this.remotingServer.registerProcessor(DLedgerRequestCode.GET.getCode(), protocolProcessor, null);
+        // 暂时不用
         this.remotingServer.registerProcessor(DLedgerRequestCode.PULL.getCode(), protocolProcessor, null);
+        // 集群之间用于数据同步
         this.remotingServer.registerProcessor(DLedgerRequestCode.PUSH.getCode(), protocolProcessor, null);
+        // 集群之间用于投票专用
         this.remotingServer.registerProcessor(DLedgerRequestCode.VOTE.getCode(), protocolProcessor, null);
+        // 集群之间用于心跳专用
         this.remotingServer.registerProcessor(DLedgerRequestCode.HEART_BEAT.getCode(), protocolProcessor, null);
 
         //start the remoting client
@@ -260,6 +266,8 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
                 }, futureExecutor);
                 break;
             }
+
+            // 暂时不用
             case PULL: {
                 PullEntriesRequest pullEntriesRequest = JSON.parseObject(request.getBody(), PullEntriesRequest.class);
                 CompletableFuture<PullEntriesResponse> future = handlePull(pullEntriesRequest);
@@ -268,6 +276,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
                 }, futureExecutor);
                 break;
             }
+            // 集群内部使用
             case PUSH: {
                 PushEntryRequest pushEntryRequest = JSON.parseObject(request.getBody(), PushEntryRequest.class);
                 CompletableFuture<PushEntryResponse> future = handlePush(pushEntryRequest);
@@ -276,6 +285,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
                 }, futureExecutor);
                 break;
             }
+            // 集群内部使用
             case VOTE: {
                 VoteRequest voteRequest = JSON.parseObject(request.getBody(), VoteRequest.class);
                 CompletableFuture<VoteResponse> future = handleVote(voteRequest);
@@ -284,6 +294,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
                 }, futureExecutor);
                 break;
             }
+            // 集群内部使用
             case HEART_BEAT: {
                 HeartBeatRequest heartBeatRequest = JSON.parseObject(request.getBody(), HeartBeatRequest.class);
                 CompletableFuture<HeartBeatResponse> future = handleHeartBeat(heartBeatRequest);
@@ -341,6 +352,7 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
 
     @Override
     public void startup() {
+        // 既有服务端也有客户端
         this.remotingServer.start();
         this.remotingClient.start();
     }

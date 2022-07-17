@@ -198,6 +198,7 @@ public class DLedgerEntryPusher {
     public void wakeUpDispatchers() {
         // 该方法主要就是遍历转发器并唤醒。本方法的核心关键就是 EntryDispatcher
         for (EntryDispatcher dispatcher : dispatcherMap.values()) {
+            // 分发给各个 follow 节点
             dispatcher.wakeup();
         }
     }
@@ -241,7 +242,7 @@ public class DLedgerEntryPusher {
                 checkTermForWaterMark(currTerm, "QuorumAckChecker");
 
                 /**
-                 * Step3：清理pendingAppendResponsesByTerm、peerWaterMarksByTerm 中本次投票轮次的数据，避免一些不必要的内存使用。
+                 * Step3：清理pendingAppendResponsesByTerm、peerWaterMarksByTerm 中非本次投票轮次的数据，避免一些不必要的内存使用。
                  */
                 if (pendingAppendResponsesByTerm.size() > 1) {
                     for (Long term : pendingAppendResponsesByTerm.keySet()) {
@@ -304,6 +305,7 @@ public class DLedgerEntryPusher {
                     }
                 }
                 // 更新 committedIndex 索引，方便 DLedgerStore 定时将 committedIndex 写入 checkpoint 中
+                // 这个是 commit 的 index
                 dLedgerStore.updateCommittedIndex(currTerm, quorumIndex);
                 /**
                  * Step5：处理 quorumIndex 之前的挂起请求，需要发送响应到客户端,其实现步骤：
@@ -312,7 +314,7 @@ public class DLedgerEntryPusher {
                 boolean needCheck = false;
                 int ackNum = 0;
                 if (quorumIndex >= 0) {
-                    // 从 quorumIndex 开始处理，没处理一条，该序号减一，直到大于0或主动退出，请看后面的退出逻辑。
+                    // 从 quorumIndex 开始处理，每处理一条，该序号减一，直到大于0或主动退出，请看后面的退出逻辑。
                     for (Long i = quorumIndex; i >= 0; i--) {
                         try {
                             // responses 中移除该日志条目的挂起请求。
@@ -333,6 +335,7 @@ public class DLedgerEntryPusher {
                                 response.setIndex(i);
                                 response.setLeaderId(memberState.getSelfId());
                                 response.setPos(((AppendFuture) future).getPos());
+                                // 触发客户端的 wait 方法能有所返回
                                 future.complete(response);
                             }
                             // ackNum，表示本次确认的数量
@@ -358,11 +361,13 @@ public class DLedgerEntryPusher {
                             response.setTerm(currTerm);
                             response.setIndex(i);
                             response.setLeaderId(memberState.getSelfId());
+                            // 超时了，给客户端触发执行
                             future.complete(response);
                         } else {
                             break;
                         }
                     }
+                    // 阻塞1ms
                     waitForRunning(1);
                 }
                 /**
@@ -485,6 +490,7 @@ public class DLedgerEntryPusher {
             request.setTerm(term);
             request.setEntry(entry);
             request.setType(target);
+            // 主节点已提交日志序号
             request.setCommitIndex(dLedgerStore.getCommittedIndex());
             return request;
         }
@@ -535,6 +541,7 @@ public class DLedgerEntryPusher {
                          */
                         case SUCCESS:
                             pendingMap.remove(x.getIndex());
+                            // 更新从节点当前已经复制的水位。不是commit, 只是刷盘
                             updatePeerWaterMark(x.getTerm(), peerId, x.getIndex());
                             quorumAckChecker.wakeup();
                             break;
@@ -543,6 +550,7 @@ public class DLedgerEntryPusher {
                          */
                          case INCONSISTENT_STATE:
                             logger.info("[Push-{}]Get INCONSISTENT_STATE when push index={} term={}", peerId, x.getIndex(), x.getTerm());
+                            // 如果 follow 返回不是 success 则进行数据校正
                             changeState(-1, PushEntryRequest.Type.COMPARE);
                             break;
                         default:
@@ -820,6 +828,8 @@ public class DLedgerEntryPusher {
                 }
                 // 主节点向从节点发送对比数据差异请求（当一个新节点被选举成为主节点时，往往这是第一步）
                 else {
+                    // 及时是同步好数据之后再 append
+                    // 只是这个操作是在有请求的时候做，不是实例启动的时候就开始做
                     doCompare();
                 }
                 waitForRunning(1);
@@ -899,7 +909,7 @@ public class DLedgerEntryPusher {
 
         /**
          * 其实现也比较简单，调用DLedgerStore 的 appendAsFollower 方法进行日志的追加
-         * 与appendAsLeader 在日志存储部分相同，只是从节点无需再转发日志
+         * 与 appendAsLeader 在日志存储部分相同，只是从节点无需再转发日志
          * @param writeIndex
          * @param request
          * @param future
@@ -908,9 +918,11 @@ public class DLedgerEntryPusher {
             CompletableFuture<PushEntryResponse> future) {
             try {
                 PreConditions.check(writeIndex == request.getEntry().getIndex(), DLedgerResponseCode.INCONSISTENT_STATE);
+                // 日志追加
                 DLedgerEntry entry = dLedgerStore.appendAsFollower(request.getEntry(), request.getTerm(), request.getLeaderId());
                 PreConditions.check(entry.getIndex() == writeIndex, DLedgerResponseCode.INCONSISTENT_STATE);
                 future.complete(buildResponse(request, DLedgerResponseCode.SUCCESS.getCode()));
+                // 更新 commitIndex
                 dLedgerStore.updateCommittedIndex(request.getTerm(), request.getCommitIndex());
             } catch (Throwable t) {
                 logger.error("[HandleDoWrite] writeIndex={}", writeIndex, t);
@@ -920,7 +932,7 @@ public class DLedgerEntryPusher {
 
         /**
          * 处理主节点发送过来的 COMPARE 请求，其实现也比较简单，最终调用 buildResponse 方法构造响应结果
-         * 主要也是返回当前从几点的 ledgerBeginIndex、ledgerEndIndex 以及投票轮次，供主节点进行判断比较
+         * 主要也是返回当前从节点的 ledgerBeginIndex、ledgerEndIndex 以及投票轮次，供主节点进行判断比较
          * @param compareIndex
          * @param request
          * @param future
@@ -954,6 +966,7 @@ public class DLedgerEntryPusher {
             try {
                 PreConditions.check(committedIndex == request.getCommitIndex(), DLedgerResponseCode.UNKNOWN);
                 PreConditions.check(request.getType() == PushEntryRequest.Type.COMMIT, DLedgerResponseCode.UNKNOWN);
+                // 更新从节点的 commitIndex
                 dLedgerStore.updateCommittedIndex(request.getTerm(), committedIndex);
                 future.complete(buildResponse(request, DLedgerResponseCode.SUCCESS.getCode()));
             } catch (Throwable t) {
@@ -994,6 +1007,9 @@ public class DLedgerEntryPusher {
          * The leader does push entries to follower, and record the pushed index. But in the following conditions, the push may get stopped.
          *   * If the follower is abnormally shutdown, its ledger end index may be smaller than before. At this time, the leader may push fast-forward entries, and retry all the time.
          *   * If the last ack is missed, and no new message is coming in.The leader may retry push the last message, but the follower will ignore it.
+         * leader 将条目推送到follower，并记录推送索引。但在以下情况下，推送可能会停止
+         *   * 如果 follower 异常关闭，其 ledger end index 可能比以前小。此时，leader 可以向前推送条目，并一直重试。
+         *   * 如果错过了最后一个ack，并且没有新消息传入。leader可以重试推送最后一条消息，但 follower 可以忽略它
          * @param endIndex
          */
         private void checkAbnormalFuture(long endIndex) {
@@ -1105,14 +1121,19 @@ public class DLedgerEntryPusher {
                  * 则调用 checkAbnormalFuture 来处理异常情况
                  */
                 else {
+                    // TODO 顺序性
+                    // follow 是按照顺序从 writeRequestMap 中获取提案的
+                    // 所以即使 leader 并发发送了多个不同的提案，follow 也会按照顺序进行执行，保证了顺序性
                     long nextIndex = dLedgerStore.getLedgerEndIndex() + 1;
                     Pair<PushEntryRequest, CompletableFuture<PushEntryResponse>> pair = writeRequestMap.remove(nextIndex);
                     if (pair == null) {
+                        // TODO 很重要的方法
                         checkAbnormalFuture(dLedgerStore.getLedgerEndIndex());
                         waitForRunning(1);
                         return;
                     }
                     PushEntryRequest request = pair.getKey();
+                    // 执行 follow 的 append 方法
                     handleDoAppend(nextIndex, request, pair.getValue());
                 }
             } catch (Throwable t) {
